@@ -1,9 +1,13 @@
 [package]
 name = "sha1_rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
+
 [dependencies]
-rayon = "1.10"
-metal = "0.32.0"
-indicatif = "0.17.8"
+hex = "0.4.3"
+indicatif = { version = "0.18", features = ["rayon"] }
+num_cpus = "1.17"
+
+[build-dependencies]
+cc = "1.0"
