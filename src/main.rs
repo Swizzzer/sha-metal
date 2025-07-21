@@ -153,7 +153,6 @@ fn main() {
             length, current_search_space
         );
 
-        // ... (循环内部的逻辑与之前完全相同) ...
         global_search_index.store(0, Ordering::Relaxed);
         unsafe {
             reset_found_flag();
@@ -169,7 +168,6 @@ fn main() {
         let mut handles = vec![];
 
         for id in 0..num_schedulers {
-            // ... (线程创建和调度逻辑完全相同) ...
             let tar_bytes_clone = tar_bytes.clone();
             let index_clone = Arc::clone(&global_search_index);
             let found_clone = Arc::clone(&found_flag);
@@ -229,7 +227,6 @@ fn main() {
 
     unsafe { cleanup_metal() };
 
-    // --- 3. 更新报告部分 ---
     let duration = start_time.elapsed();
     println!("\n\n=== Final Statistics ===");
     println!("Total Time: {:.3?}", duration);
