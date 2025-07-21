@@ -1,13 +1,14 @@
 [package]
-name = "sha1_rs"
-version = "0.1.1"
+name = "sha1-cracker"
+version = "0.1.0"
 edition = "2024"
-
+authors = ["Swizzer"]
 
 [dependencies]
 hex = "0.4.3"
-indicatif = { version = "0.18", features = ["rayon"] }
+indicatif = "0.18"
 num_cpus = "1.17"
+clap = { version = "4.5", features = ["derive"] }
 
 [build-dependencies]
 cc = "1.0"

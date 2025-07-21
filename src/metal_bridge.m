@@ -12,6 +12,7 @@ id<MTLBuffer> resultBuffer;
 id<MTLBuffer> targetBuffer;
 id<MTLBuffer> foundBuffer;
 id<MTLBuffer> baseIndexBuffer;
+id<MTLBuffer> lengthBuffer;
 
 const char *sha1MetalSource = R"(
 #include <metal_stdlib>
@@ -20,7 +21,6 @@ using namespace metal;
 inline uint32_t rotateLeft(uint32_t x, uint32_t n) {
     return (x << n) | (x >> (32 - n));
 }
-
 inline uchar indexToChar(uint64_t index) {
     const uchar chars[16] = {
         '0', '1', '2', '3', '4', '5', '6', '7',
@@ -29,20 +29,42 @@ inline uchar indexToChar(uint64_t index) {
     return chars[index & 0xF];
 }
 
-void sha1_hash_local(thread const uchar* input, thread uchar* output) {
+// less than 55bytes => 1 block
+void sha1_hash_variable(thread const uchar* input, uint length, thread uchar* output) {
     uint32_t H[5] = {
         0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0
     };
-    uint32_t W[80];
-    W[0] = ((uint32_t)input[0] << 24) | ((uint32_t)input[1] << 16) | ((uint32_t)input[2] << 8) | input[3];
-    W[1] = ((uint32_t)input[4] << 24) | ((uint32_t)input[5] << 16) | ((uint32_t)input[6] << 8) | input[7];
-    W[2] = 0x80000000;
-    for(int i=3; i<14; ++i) W[i] = 0;
-    W[14] = 0;
-    W[15] = 64;
 
+    uint32_t W[16];
+    uchar padded_block[64];
+
+    for(uint i=0; i<length; ++i) padded_block[i] = input[i];
+    for(uint i=length; i<64; ++i) padded_block[i] = 0;
+
+    padded_block[length] = 0x80;
+
+    uint64_t bit_length = (uint64_t)length * 8;
+    padded_block[63] = bit_length & 0xFF;
+    padded_block[62] = (bit_length >> 8) & 0xFF;
+    padded_block[61] = (bit_length >> 16) & 0xFF;
+    padded_block[60] = (bit_length >> 24) & 0xFF;
+    padded_block[59] = (bit_length >> 32) & 0xFF;
+    padded_block[58] = (bit_length >> 40) & 0xFF;
+    padded_block[57] = (bit_length >> 48) & 0xFF;
+    padded_block[56] = (bit_length >> 56) & 0xFF;
+
+
+    for(int i=0; i<16; ++i) {
+        W[i] = ((uint32_t)padded_block[i*4 + 0] << 24) |
+               ((uint32_t)padded_block[i*4 + 1] << 16) |
+               ((uint32_t)padded_block[i*4 + 2] << 8)  |
+               ((uint32_t)padded_block[i*4 + 3]);
+    }
+
+    uint32_t M[80];
+    for(int i=0; i<16; ++i) M[i] = W[i];
     for (int i = 16; i < 80; i++) {
-        W[i] = rotateLeft(W[i-3] ^ W[i-8] ^ W[i-14] ^ W[i-16], 1);
+        M[i] = rotateLeft(M[i-3] ^ M[i-8] ^ M[i-14] ^ M[i-16], 1);
     }
 
     uint32_t a = H[0], b = H[1], c = H[2], d = H[3], e = H[4];
@@ -54,12 +76,13 @@ void sha1_hash_local(thread const uchar* input, thread uchar* output) {
         else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
         else { f = b ^ c ^ d; k = 0xCA62C1D6; }
 
-        uint32_t temp = rotateLeft(a, 5) + f + e + k + W[i];
+        uint32_t temp = rotateLeft(a, 5) + f + e + k + M[i];
         e = d; d = c; c = rotateLeft(b, 30); b = a; a = temp;
     }
 
     H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e;
 
+    // 输出
     for (int i = 0; i < 5; i++) {
         output[i*4 + 0] = (H[i] >> 24) & 0xff;
         output[i*4 + 1] = (H[i] >> 16) & 0xff;
@@ -68,25 +91,28 @@ void sha1_hash_local(thread const uchar* input, thread uchar* output) {
     }
 }
 
-kernel void sha1_search(
+kernel void sha1_search_variable(
     device uchar* result_out [[buffer(0)]],
-    constant uchar* target [[buffer(1)]],
+    constant uchar* target [[buffer(1)]], 
     device atomic_uint* found [[buffer(2)]],
     constant uint64_t* baseIndex [[buffer(3)]],
+    constant uint* length [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (atomic_load_explicit(found, memory_order_relaxed) != 0) return;
 
     uint64_t candidateIndex = baseIndex[0] + gid;
-    thread uchar candidate[8];
+    uint len = *length;
+
+    thread uchar candidate[16];
     uint64_t idx = candidateIndex;
-    for (int i = 7; i >= 0; i--) {
+    for (int i = len - 1; i >= 0; i--) {
         candidate[i] = indexToChar(idx);
         idx >>= 4;
     }
 
     thread uchar hash[20];
-    sha1_hash_local(candidate, hash);
+    sha1_hash_variable(candidate, len, hash);
 
     bool match = true;
     for (int i = 0; i < 20; i++) {
@@ -97,9 +123,10 @@ kernel void sha1_search(
     }
 
     if (match) {
-        atomic_store_explicit(found, 1, memory_order_relaxed);
-        for (int i = 0; i < 8; i++) {
-            result_out[i] = candidate[i];
+        if (atomic_fetch_add_explicit(found, 1, memory_order_relaxed) == 0) {
+            for (uint i = 0; i < len; i++) {
+                result_out[i] = candidate[i];
+            }
         }
     }
 }
@@ -141,7 +168,7 @@ __attribute__((visibility("default"))) int init_metal(GPUInfo *gpu_info) {
     gpu_info->core_count = get_gpu_cores_from_system_profiler();
     if (gpu_info->core_count == 0) {
       gpu_info->core_count = 8;
-    } // Fallback
+    }
 
     commandQueue = [device newCommandQueue];
     if (!commandQueue) {
@@ -150,7 +177,7 @@ __attribute__((visibility("default"))) int init_metal(GPUInfo *gpu_info) {
 
     NSString *source = [NSString stringWithUTF8String:sha1MetalSource];
     MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
-    options.fastMathEnabled = YES;
+    options.mathMode = YES;
 
     id<MTLLibrary> library = [device newLibraryWithSource:source
                                                   options:options
@@ -162,7 +189,7 @@ __attribute__((visibility("default"))) int init_metal(GPUInfo *gpu_info) {
     }
 
     id<MTLFunction> kernelFunction =
-        [library newFunctionWithName:@"sha1_search"];
+        [library newFunctionWithName:@"sha1_search_variable"];
     if (!kernelFunction) {
       return -1;
     }
@@ -187,8 +214,11 @@ __attribute__((visibility("default"))) int init_metal(GPUInfo *gpu_info) {
                                       options:MTLResourceStorageModeShared];
     baseIndexBuffer = [device newBufferWithLength:sizeof(uint64_t)
                                           options:MTLResourceStorageModeShared];
+    lengthBuffer = [device newBufferWithLength:sizeof(unsigned int)
+                                       options:MTLResourceStorageModeShared];
 
-    if (!resultBuffer || !targetBuffer || !foundBuffer || !baseIndexBuffer) {
+    if (!resultBuffer || !targetBuffer || !foundBuffer || !baseIndexBuffer ||
+        !lengthBuffer) {
       return -1;
     }
     return 0;
@@ -197,10 +227,12 @@ __attribute__((visibility("default"))) int init_metal(GPUInfo *gpu_info) {
 
 __attribute__((visibility("default"))) int
 search_on_gpu(uint64_t start_index, uint64_t count, const uint8_t *target,
-              uint8_t *result, int max_threads_per_threadgroup) {
+              uint8_t *result, int max_threads_per_threadgroup,
+              uint32_t length) {
   @autoreleasepool {
     memcpy([targetBuffer contents], target, 20);
     *(uint64_t *)[baseIndexBuffer contents] = start_index;
+    *(unsigned int *)[lengthBuffer contents] = length;
     *(unsigned int *)[foundBuffer contents] = 0;
 
     id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
@@ -212,6 +244,7 @@ search_on_gpu(uint64_t start_index, uint64_t count, const uint8_t *target,
     [encoder setBuffer:targetBuffer offset:0 atIndex:1];
     [encoder setBuffer:foundBuffer offset:0 atIndex:2];
     [encoder setBuffer:baseIndexBuffer offset:0 atIndex:3];
+    [encoder setBuffer:lengthBuffer offset:0 atIndex:4];
 
     NSUInteger w = computePipelineState.threadExecutionWidth;
     NSUInteger threadsPerGroup = (max_threads_per_threadgroup / w) * w;
@@ -232,13 +265,17 @@ search_on_gpu(uint64_t start_index, uint64_t count, const uint8_t *target,
     [commandBuffer waitUntilCompleted];
 
     if (*(unsigned int *)[foundBuffer contents] != 0) {
-      memcpy(result, [resultBuffer contents], 8);
+      memcpy(result, [resultBuffer contents], length);
       return 1;
     }
     return 0;
   }
 }
-
+__attribute__((visibility("default"))) void reset_found_flag() {
+  if (foundBuffer) {
+    *(unsigned int *)[foundBuffer contents] = 0;
+  }
+}
 __attribute__((visibility("default"))) void cleanup_metal() {
   device = nil;
   commandQueue = nil;
