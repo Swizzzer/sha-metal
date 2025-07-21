@@ -1,9 +1,9 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use metal::*;
+use rayon::prelude::*;
 use std::ffi::c_void;
 use std::sync::atomic::{self, AtomicU32};
 use std::time::Instant;
-use rayon::prelude::*;
 
 const CHARSET: &[u8] = b"0123456789abced";
 const MSG_LEN: usize = 8;
@@ -38,32 +38,39 @@ fn main() {
     println!("---------------------------------------");
 
     let device = Device::system_default().expect("No Metal device found.");
+
     let library = device
         .new_library_with_source(SHADER_SRC, &CompileOptions::new())
         .expect("Failed to compile Metal library.");
+
     let kernel = library
         .get_function("sha1_kernel", None)
         .expect("Failed to get kernel function.");
+
     let pipeline_state = device
         .new_compute_pipeline_state_with_function(&kernel)
         .expect("Failed to create pipeline state.");
+
     let target_hash = parse_hash(TARGET_HASH_STR);
 
-    // FIX: 根据 MAX_MSG_LEN 分配缓冲区
     let msgs_buffer = device.new_buffer(
         (BATCH_SIZE * MAX_MSG_LEN) as u64,
         MTLResourceOptions::StorageModeManaged,
     );
+
     let found_buffer = device.new_buffer(
         std::mem::size_of::<AtomicU32>() as u64,
         MTLResourceOptions::StorageModeShared,
     );
+
     let target_hash_buffer = device.new_buffer_with_data(
         target_hash.as_ptr() as *const c_void,
         (target_hash.len() * 4) as u64,
         MTLResourceOptions::StorageModeManaged,
     );
+
     let msg_len_u32 = MSG_LEN as u32;
+
     let msg_len_buffer = device.new_buffer_with_data(
         &msg_len_u32 as *const u32 as *const c_void,
         4,
@@ -78,44 +85,46 @@ fn main() {
     let mut start: u64 = 0;
     while start < total_candidates {
         let current_batch_size = (total_candidates - start).min(BATCH_SIZE as u64) as usize;
-
-        let msgs_vec =
-            generate_msgs_for_batch(start, current_batch_size, CHARSET, MSG_LEN);
+        let msgs_vec = generate_msgs_for_batch(start, current_batch_size, CHARSET, MSG_LEN);
         let ptr = msgs_buffer.contents();
+
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                msgs_vec.as_ptr(),
-                ptr as *mut u8,
-                msgs_vec.len(),
-            );
+            std::ptr::copy_nonoverlapping(msgs_vec.as_ptr(), ptr as *mut u8, msgs_vec.len());
         }
+
         msgs_buffer.did_modify_range(NSRange::new(0, msgs_vec.len() as u64));
 
         let found_ptr = found_buffer.contents() as *mut AtomicU32;
+
         unsafe {
             (*found_ptr).store(u32::MAX, atomic::Ordering::Relaxed);
         }
 
         let command_buffer = command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
+
         encoder.set_compute_pipeline_state(&pipeline_state);
         encoder.set_buffer(0, Some(&msgs_buffer), 0);
         encoder.set_buffer(1, Some(&found_buffer), 0);
         encoder.set_buffer(2, Some(&target_hash_buffer), 0);
         encoder.set_buffer(3, Some(&msg_len_buffer), 0);
+
         let grid_size = MTLSize {
             width: current_batch_size as u64,
             height: 1,
             depth: 1,
         };
+
         let threadgroup_size = pipeline_state
             .max_total_threads_per_threadgroup()
             .min(current_batch_size as u64);
+
         let threadgroup_dims = MTLSize {
             width: threadgroup_size,
             height: 1,
             depth: 1,
         };
+
         encoder.dispatch_threads(grid_size, threadgroup_dims);
         encoder.end_encoding();
         command_buffer.commit();
@@ -124,6 +133,7 @@ fn main() {
         let found_idx = unsafe {
             (*(found_buffer.contents() as *const AtomicU32)).load(atomic::Ordering::Relaxed)
         };
+
         if found_idx != u32::MAX {
             let found_global_idx = start + found_idx as u64;
             let msg = index_to_msg(found_global_idx, CHARSET, MSG_LEN);
@@ -136,6 +146,7 @@ fn main() {
             println!("   Average speed: {:.2} MHashes/sec", speed / 1_000_000.0);
             return;
         }
+
         start += current_batch_size as u64;
         pb.set_position(start);
     }
@@ -153,19 +164,21 @@ fn parse_hash(hash_str: &str) -> [u32; 5] {
     hash
 }
 
-fn generate_msgs_for_batch(batch_start_idx: u64, batch_size: usize, charset: &[u8], msg_len: usize) -> Vec<u8> {
+fn generate_msgs_for_batch(
+    batch_start_idx: u64,
+    batch_size: usize,
+    charset: &[u8],
+    msg_len: usize,
+) -> Vec<u8> {
     let mut msgs = vec![0u8; batch_size * MAX_MSG_LEN];
     let charset_len = charset.len() as u64;
 
-    // 将 Vec 按每个密码块(MAX_MSG_LEN)切分，然后并行处理
-    msgs
-        .par_chunks_mut(MAX_MSG_LEN)
+    msgs.par_chunks_mut(MAX_MSG_LEN)
         .enumerate() // 获取每个块的索引 (0, 1, 2...)
         .for_each(|(i, msg_chunk)| {
             let current_idx = batch_start_idx + i as u64;
             let mut temp_idx = current_idx;
-            
-            // 这个内部循环仍然是串行的，但外层的多个密码是并行生成的
+
             for j in 0..msg_len {
                 let char_idx = (temp_idx % charset_len) as usize;
                 msg_chunk[j] = charset[char_idx];
