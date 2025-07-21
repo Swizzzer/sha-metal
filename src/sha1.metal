@@ -4,36 +4,36 @@ using namespace metal;
 #define TO_BIG_ENDIAN(n) ( ((n) << 24) | (((n) << 8) & 0x00ff0000) | (((n) >> 8) & 0x0000ff00) | ((n) >> 24) )
 inline uint rotl(uint x, uint n) { return (x << n) | (x >> (32 - n)); }
 
-constant constexpr uint MAX_MSG_LEN = 16;
+// 与 Rust 代码同步的最大消息长度
+constant constexpr uint MAX_MSG_LEN = 8;
 
 kernel void sha1_kernel(
-    device atomic_uint* found_index     [[buffer(0)]],
-    constant const uint* target_hash    [[buffer(1)]],
-    constant const uint& msg_len        [[buffer(2)]],
-    constant const char* charset        [[buffer(3)]],
-    constant const ulong& charset_len   [[buffer(4)]],
-    constant const ulong& start_index   [[buffer(5)]],
+    device const uchar* passwords [[buffer(0)]],
+    device atomic_uint* found_index [[buffer(1)]],
+    constant const uint* target_hash [[buffer(2)]],
+    constant const uint& msg_len [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    ulong global_index = start_index + gid;
-    ulong temp_idx = global_index;
-    
     uint block[16] = {0};
     thread uchar* p_block = (thread uchar*)block;
+    
+    device const uchar* p_password = passwords + (gid * MAX_MSG_LEN);
 
     for (uint i = 0; i < msg_len; ++i) {
-        uint char_idx = temp_idx % charset_len;
-        p_block[i] = charset[char_idx];
-        temp_idx /= charset_len;
+        p_block[i] = p_password[i];
     }
+    p_block[msg_len] = 0x80;
 
-
-    p_block[msg_len] = 0x80;    
+    // msg_len < 56 时在一个块内处理
     uint64_t bit_length = (uint64_t)msg_len * 8;
-    p_block[56] = (uchar)(bit_length >> 56); p_block[57] = (uchar)(bit_length >> 48);
-    p_block[58] = (uchar)(bit_length >> 40); p_block[59] = (uchar)(bit_length >> 32);
-    p_block[60] = (uchar)(bit_length >> 24); p_block[61] = (uchar)(bit_length >> 16);
-    p_block[62] = (uchar)(bit_length >> 8);  p_block[63] = (uchar)(bit_length);
+    p_block[56] = (uchar)(bit_length >> 56);
+    p_block[57] = (uchar)(bit_length >> 48);
+    p_block[58] = (uchar)(bit_length >> 40);
+    p_block[59] = (uchar)(bit_length >> 32);
+    p_block[60] = (uchar)(bit_length >> 24);
+    p_block[61] = (uchar)(bit_length >> 16);
+    p_block[62] = (uchar)(bit_length >> 8);
+    p_block[63] = (uchar)(bit_length);
 
     for (int i = 0; i < 16; ++i) {
         block[i] = TO_BIG_ENDIAN(block[i]);

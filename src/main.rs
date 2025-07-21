@@ -3,22 +3,36 @@ use metal::*;
 use std::ffi::c_void;
 use std::sync::atomic::{self, AtomicU32};
 use std::time::Instant;
+use rayon::prelude::*;
 
-const CHARSET: &[u8] = b"12345678ab";
-const MSG_LEN: usize = 10;
-const TARGET_HASH_STR: &str = "d36ecb3306c30fe434a768c9d8b6f4bf2eb9abb3"; // sha1(b"12345678ab")
-const MAX_MSG_LEN: usize = 16;
-const BATCH_SIZE: usize = 1 << 25;
+const CHARSET: &[u8] = b"0123456789abced";
+const MSG_LEN: usize = 8;
+const TARGET_HASH_STR: &str = "e0378e12d7ac5f9af37052d8763be4f3e8d13041"; // "abcdabcd"
+
+// 最大支持的消息长度，用于内存布局。必须与 Metal 代码同步。
+const MAX_MSG_LEN: usize = 8;
+
+const BATCH_SIZE: usize = 1 << 22;
 const SHADER_SRC: &str = include_str!("sha1.metal");
 
 fn main() {
-    assert!(MSG_LEN <= MAX_MSG_LEN, "MSG_LEN cannot exceed MAX_MSG_LEN");
+    assert!(
+        MSG_LEN <= MAX_MSG_LEN,
+        "MSG_LEN ({}) cannot exceed MAX_MSG_LEN ({})",
+        MSG_LEN,
+        MAX_MSG_LEN
+    );
 
-    let charset_len = CHARSET.len() as u64;
-    let total_candidates = charset_len.pow(MSG_LEN as u32);
+    let charset_len = CHARSET.len();
+    let total_candidates = charset_len.pow(MSG_LEN as u32) as u64;
+
     println!("Target Hash: {}", TARGET_HASH_STR);
+    println!("Charset: {}", String::from_utf8_lossy(CHARSET));
     println!("Message Length: {}", MSG_LEN);
-    println!("Total Search Space: {}", total_candidates);
+    println!(
+        "Total Search Space: {} ({} ^ {})",
+        total_candidates, charset_len, MSG_LEN
+    );
     println!("Batch Size: {} candidates", BATCH_SIZE);
     println!("Using GPU: {}", Device::system_default().unwrap().name());
     println!("---------------------------------------");
@@ -33,37 +47,28 @@ fn main() {
     let pipeline_state = device
         .new_compute_pipeline_state_with_function(&kernel)
         .expect("Failed to create pipeline state.");
-
     let target_hash = parse_hash(TARGET_HASH_STR);
 
-    // 交给GPU生成消息候选
-    let found_buffer = device.new_buffer(4, MTLResourceOptions::StorageModeShared);
-    let target_hash_buffer = device.new_buffer_with_data(
-        target_hash.as_ptr() as *const c_void,
-        20,
+    // FIX: 根据 MAX_MSG_LEN 分配缓冲区
+    let msgs_buffer = device.new_buffer(
+        (BATCH_SIZE * MAX_MSG_LEN) as u64,
         MTLResourceOptions::StorageModeManaged,
     );
-
+    let found_buffer = device.new_buffer(
+        std::mem::size_of::<AtomicU32>() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let target_hash_buffer = device.new_buffer_with_data(
+        target_hash.as_ptr() as *const c_void,
+        (target_hash.len() * 4) as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
     let msg_len_u32 = MSG_LEN as u32;
     let msg_len_buffer = device.new_buffer_with_data(
         &msg_len_u32 as *const u32 as *const c_void,
         4,
         MTLResourceOptions::StorageModeManaged,
     );
-
-    let charset_buffer = device.new_buffer_with_data(
-        CHARSET.as_ptr() as *const c_void,
-        CHARSET.len() as u64,
-        MTLResourceOptions::StorageModeManaged,
-    );
-    let charset_len_u64 = charset_len;
-    let charset_len_buffer = device.new_buffer_with_data(
-        &charset_len_u64 as *const u64 as *const c_void,
-        8,
-        MTLResourceOptions::StorageModeManaged,
-    );
-
-    let start_index_buffer = device.new_buffer(8, MTLResourceOptions::StorageModeManaged);
 
     let command_queue = device.new_command_queue();
     let start_time = Instant::now();
@@ -74,12 +79,17 @@ fn main() {
     while start < total_candidates {
         let current_batch_size = (total_candidates - start).min(BATCH_SIZE as u64) as usize;
 
-        // 更新下一个起始索引
-        let ptr = start_index_buffer.contents() as *mut u64;
+        let msgs_vec =
+            generate_msgs_for_batch(start, current_batch_size, CHARSET, MSG_LEN);
+        let ptr = msgs_buffer.contents();
         unsafe {
-            *ptr = start;
+            std::ptr::copy_nonoverlapping(
+                msgs_vec.as_ptr(),
+                ptr as *mut u8,
+                msgs_vec.len(),
+            );
         }
-        start_index_buffer.did_modify_range(NSRange::new(0, 8));
+        msgs_buffer.did_modify_range(NSRange::new(0, msgs_vec.len() as u64));
 
         let found_ptr = found_buffer.contents() as *mut AtomicU32;
         unsafe {
@@ -89,13 +99,10 @@ fn main() {
         let command_buffer = command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
         encoder.set_compute_pipeline_state(&pipeline_state);
-        encoder.set_buffer(0, Some(&found_buffer), 0);
-        encoder.set_buffer(1, Some(&target_hash_buffer), 0);
-        encoder.set_buffer(2, Some(&msg_len_buffer), 0);
-        encoder.set_buffer(3, Some(&charset_buffer), 0);
-        encoder.set_buffer(4, Some(&charset_len_buffer), 0);
-        encoder.set_buffer(5, Some(&start_index_buffer), 0);
-
+        encoder.set_buffer(0, Some(&msgs_buffer), 0);
+        encoder.set_buffer(1, Some(&found_buffer), 0);
+        encoder.set_buffer(2, Some(&target_hash_buffer), 0);
+        encoder.set_buffer(3, Some(&msg_len_buffer), 0);
         let grid_size = MTLSize {
             width: current_batch_size as u64,
             height: 1,
@@ -135,7 +142,6 @@ fn main() {
 
     pb.finish_and_clear();
     println!("\n❌ Message not found in the search space.");
-    println!("   Time taken: {:.2?}s", start_time.elapsed().as_secs_f32());
 }
 
 fn parse_hash(hash_str: &str) -> [u32; 5] {
@@ -145,6 +151,29 @@ fn parse_hash(hash_str: &str) -> [u32; 5] {
         hash[i] = u32::from_str_radix(sub, 16).expect("Invalid hash format");
     }
     hash
+}
+
+fn generate_msgs_for_batch(batch_start_idx: u64, batch_size: usize, charset: &[u8], msg_len: usize) -> Vec<u8> {
+    let mut msgs = vec![0u8; batch_size * MAX_MSG_LEN];
+    let charset_len = charset.len() as u64;
+
+    // 将 Vec 按每个密码块(MAX_MSG_LEN)切分，然后并行处理
+    msgs
+        .par_chunks_mut(MAX_MSG_LEN)
+        .enumerate() // 获取每个块的索引 (0, 1, 2...)
+        .for_each(|(i, msg_chunk)| {
+            let current_idx = batch_start_idx + i as u64;
+            let mut temp_idx = current_idx;
+            
+            // 这个内部循环仍然是串行的，但外层的多个密码是并行生成的
+            for j in 0..msg_len {
+                let char_idx = (temp_idx % charset_len) as usize;
+                msg_chunk[j] = charset[char_idx];
+                temp_idx /= charset_len;
+            }
+        });
+
+    msgs
 }
 
 fn index_to_msg(index: u64, charset: &[u8], msg_len: usize) -> String {
