@@ -7,10 +7,8 @@ use std::time::Instant;
 const CHARSET: &[u8] = b"12345678ab";
 const MSG_LEN: usize = 10;
 const TARGET_HASH_STR: &str = "d36ecb3306c30fe434a768c9d8b6f4bf2eb9abb3"; // sha1(b"12345678ab")
-
 const MAX_MSG_LEN: usize = 16;
 const BATCH_SIZE: usize = 1 << 25;
-
 const SHADER_SRC: &str = include_str!("sha1.metal");
 
 fn main() {
