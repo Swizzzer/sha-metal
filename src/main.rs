@@ -174,7 +174,7 @@ fn generate_msgs_for_batch(
     let charset_len = charset.len() as u64;
 
     msgs.par_chunks_mut(MAX_MSG_LEN)
-        .enumerate() // 获取每个块的索引 (0, 1, 2...)
+        .enumerate()
         .for_each(|(i, msg_chunk)| {
             let current_idx = batch_start_idx + i as u64;
             let mut temp_idx = current_idx;
