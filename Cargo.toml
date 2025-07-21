@@ -1,0 +1,9 @@
+[package]
+name = "sha1_rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rayon = "1.10"
+metal = "0.32.0"
+indicatif = "0.17.8"
