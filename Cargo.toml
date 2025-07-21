@@ -2,7 +2,7 @@
 name = "sha1-cracker"
 version = "0.1.0"
 edition = "2024"
-authors = ["Swizzer"]
+authors = ["Swizzer", "Gemini Pro 2.5"]
 
 [dependencies]
 hex = "0.4.3"
