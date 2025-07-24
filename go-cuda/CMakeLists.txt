@@ -28,7 +28,7 @@ add_custom_command(
     COMMENT "Building Go executable..."
 )
 
-add_custom_target(${EXECUTABLE_NAME} ALL
+add_custom_target(${EXECUTABLE_NAME}_build_step ALL
     DEPENDS ${CMAKE_BINARY_DIR}/${EXECUTABLE_NAME}
 )
 
