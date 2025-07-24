@@ -1,4 +1,4 @@
-# Sha1-GPU
+# SHA1-GPU-Cracking
 
 利用 GPU 的并行计算能力，在 GPU 上高效执行 SHA-1 哈希爆破。
 
