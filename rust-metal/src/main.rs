@@ -123,7 +123,7 @@ fn main() {
     let gpu_name = unsafe { CStr::from_ptr(gpu_info.name.as_ptr()) }.to_string_lossy();
     let gpu_cores = gpu_info.core_count as u64;
     let max_threads_per_threadgroup = gpu_info.max_threads_per_threadgroup as u64;
-    let gpu_batch_size = (gpu_cores * max_threads_per_threadgroup * 64).min(1 << 24);
+    let gpu_batch_size = (gpu_cores * max_threads_per_threadgroup * 128).min(1 << 26);
 
     println!("\n=== Rust/Metal Configuration ===");
     println!("GPU: {}", gpu_name);
